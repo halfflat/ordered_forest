@@ -9,22 +9,25 @@ struct ordered_forest {
     using size_type = std::size_t;
 
     struct node {
-        friend class ordered_forest;
-        operator bool() const { return item_; }
-
-    protected:
-        // Each distinct node has a distinct item_ pointer.
-        // A null item_ pointer indicates the invalid node value.
-
         V* item_ = nullptr;
         node* parent_ = nullptr;
         node* child_ = nullptr;
-        node* left_ = nullptr;
-        node* right_ = nullptr;
+        node* next_ = nullptr;
     };
 
+    struct iterator_base {
+        node* n_ = nullptr;
+
+        iterator_base() = default;
+        explicit iterator_base(node* n): n_(n) {}
+    };
+
+    // Constructor overloads for iterators permit construction of any const
+    // iterator from any other iterator, or of any mutable iterator from any
+    // other mutable iterator.
+
     template <bool const_flag>
-    struct iterator_mc: node {
+    struct iterator_mc: iterator_base {
         using pointer = std::conditional_t<const_flag, const V*, V*>;
         using reference = std::conditional_t<const_flag, const V&, V&>;
         using value_type = V;
@@ -32,43 +35,52 @@ struct ordered_forest {
         using iterator_tag = std::forward_iterator_tag;
 
         iterator_mc() = default;
-        iterator_mc(const node& n): node(n) {}
 
-        iterator_mc parent() const { return parent_? *parent_: node{}; }
-        iterator_mc next() const { return right_? *right_: node{}; }
-        iterator_mc prev() const { return left_? *left_: node{}; }
-        iterator_mc child() const { return child_? *child_: node{}; }
+        template <bool flag = const_flag, typename std::enable_if_t<flag, int> = 0>
+        iterator_mc(const iterator_mc<false>& i): iterator_base(i.n_) {}
 
-        bool operator==(const node& a) const { return item_ == a.item_; }
-        bool operator!=(const node& a) const { return item_ != a.item_; }
+        iterator_mc parent() const { return iterator_mc{n_? n_->parent_: nullptr}; }
+        iterator_mc next() const { return iterator_mc{n_? n_->next_: nullptr}; }
+        iterator_mc child() const { return iterator_mc{n_? n_->child_: nullptr}; }
+
+        bool operator==(const iterator_base& a) const { return n_ == a.n_; }
+        bool operator!=(const iterator_base& a) const { return n_ != a.n_; }
 
         iterator_mc preorder_next() const {
-            if (child_) return *child_;
+            if (!n_) return {};
+            if (n_->child_) return iterator_mc{n_->child_};
 
-            const node* x = this;
-            while (x && !x->right_) x = x->parent_;
-            return x? *x->right_: node{};
+            node* x = n_;
+            while (x && !x->next_) x = x->parent_;
+            return iterator_mc{x? x->next_: nullptr};
         }
 
         iterator_mc postorder_next() const {
-            if (right_) {
-                const node* x = *right_;
-                while (const node* c = x->child_) x = c;
-                return *x;
+            if (!n_) return {};
+            if (n_->next_) {
+                node* x = n_->next_;
+                while (node* c = x->child_) x = c;
+                return iterator_mc{x};
             }
             else return parent();
         }
 
-        reference operator*() const { return *item_; }
-        pointer operator->() const { return item_; }
+        reference operator*() const { return *n_->item_; }
+        pointer operator->() const { return n_->item_; }
+
+    protected:
+        friend ordered_forest;
+
+        explicit iterator_mc(node* n): iterator_base(n) {}
+        using iterator_base::n_;
     };
 
     template <bool const_flag>
     struct child_iterator_mc: iterator_mc<const_flag> {
         child_iterator_mc() = default;
-        child_iterator_mc(const node& n): iterator_mc<const_flag>(n) {}
+        child_iterator_mc(const iterator_mc<const_flag>& i): iterator_mc<const_flag>(i) {}
 
-        child_iterator_mc& operator++() { return *this = next(); }
+        child_iterator_mc& operator++() { return *this = this->next(); }
         child_iterator_mc operator++(int) { auto p = *this; return ++*this, p; }
     };
 
@@ -78,9 +90,9 @@ struct ordered_forest {
     template <bool const_flag>
     struct preorder_iterator_mc: iterator_mc<const_flag> {
         preorder_iterator_mc() = default;
-        preorder_iterator_mc(const node& n): iterator_mc<const_flag>(n) {}
+        preorder_iterator_mc(const iterator_mc<const_flag>& i): iterator_mc<const_flag>(i) {}
 
-        preorder_iterator_mc& operator++() { return *this = preorder_next(); }
+        preorder_iterator_mc& operator++() { return *this = this->preorder_next(); }
         preorder_iterator_mc operator++(int) { auto p = *this; return ++*this, p; }
     };
 
@@ -90,9 +102,9 @@ struct ordered_forest {
     template <bool const_flag>
     struct postorder_iterator_mc: iterator_mc<const_flag> {
         postorder_iterator_mc() = default;
-        postorder_iterator_mc(const node& n): iterator_mc<const_flag>(n) {}
+        postorder_iterator_mc(const iterator_mc<const_flag>& i): iterator_mc<const_flag>(i) {}
 
-        postorder_iterator_mc& operator++() { return *this = postorder_next(); }
+        postorder_iterator_mc& operator++() { return *this = this->postorder_next(); }
         postorder_iterator_mc operator++(int) { auto p = *this; return ++*this, p; }
     };
 
@@ -100,11 +112,11 @@ struct ordered_forest {
     using const_postorder_iterator = postorder_iterator_mc<true>;
 
     ordered_forest(Allocator alloc = Allocator{}):
-        item_alloc(std::move(alloc)),
-        node_alloc(item_alloc),
+        item_alloc_(std::move(alloc)),
+        node_alloc_(item_alloc_)
     {}
 
-    bool empty() const { return !first; }
+    bool empty() const { return !first_; }
 
     // Note: size is O(n) in the number of elements n.
     std::size_t size() const {
@@ -113,23 +125,29 @@ struct ordered_forest {
         return n;
     }
 
-    child_iterator child_begin(node n = first_or_empty()) { return child_iterator{n}; }
-    const_child_iterator child_begin(node n = first_or_empty()) const { return const_child_iterator{n}; }
+    child_iterator child_begin(const iterator_mc<false>& i) { return child_iterator{i}; }
+    const_child_iterator child_begin(const iterator_mc<true>& i) const { return const_child_iterator{i}; }
 
-    child_iterator child_end(node = {}) { return {}; }
-    const_child_iterator child_end(node = {}) const { return {}; }
+    child_iterator child_end(const iterator_base&) { return {}; }
+    const_child_iterator child_end(const iterator_base&) const { return {}; }
 
-    child_iterator child_begin(node n = first_or_empty()) { return child_iterator{n}; }
-    const_child_iterator child_begin(node n = first_or_empty()) const { return const_child_iterator{n}; }
+    child_iterator root_begin() { return child_iterator{first_else_end()}; }
+    const_child_iterator root_begin() const { return const_child_iterator{first_else_end()}; }
 
-    child_iterator child_end(node = {}) { return {}; }
-    const_child_iterator child_end(node = {}) const { return {}; }
+    child_iterator root_end() { return child_iterator{}; }
+    const_child_iterator root_end() const { return const_child_iterator{}; }
 
-    postorder_iterator postorder_begin(node n = first_or_empty()) { return postorder_iterator{n}; }
-    const_postorder_iterator postorder_begin(node n = first_or_empty()) const { return const_postorder_iterator{n}; }
+    postorder_iterator postorder_begin() { return postorder_iterator{first_else_end()}; }
+    const_postorder_iterator postorder_begin() const { return const_postorder_iterator{first_else_end()}; }
 
-    postorder_iterator postorder_end(node = {}) { return {}; }
-    const_postorder_iterator postorder_end(node = {}) const { return {}; }
+    postorder_iterator postorder_end(const iterator_base&) { return {}; }
+    const_postorder_iterator postorder_end(const iterator_base&) const { return {}; }
+
+    preorder_iterator preorder_begin() { return preorder_iterator{first_else_end()}; }
+    const_preorder_iterator preorder_begin() const { return const_preorder_iterator{first_else_end()}; }
+
+    preorder_iterator preorder_end(const iterator_base&) { return {}; }
+    const_preorder_iterator preorder_end(const iterator_base&) const { return {}; }
 
     // Default iteration is preorder.
 
@@ -148,101 +166,207 @@ struct ordered_forest {
     // Insertion and emplace operations:
     //
     // * All return an iterator to the last inserted node, or the an iterator to the referenced
-    //   node if the collection of inserted items is empty.
+    //   node (or first tree, for push_front) if the collection of inserted items is empty.
     //
     // * The iterator argument may not be an end iterator.
     //
-    // * Any iterator that compares equal to the iterator argument is invalidated.
-
-    // Insert/emplace item as previous sibling.
-
-    template <typename Iter, typename = std::enable_if_t<std::is_base_of<iterator_mc<false>, Iter>::value>>
-    Iter insert(const Iter& n, const V& item) { return insert_impl(n, make_node(item)); }
-
-    template <typename Iter, typename = std::enable_if_t<std::is_base_of<iterator_mc<false>, Iter>::value>>
-    Iter insert(const Iter& n, V&& item) { return insert_impl(n, make_node(std::move(item))); }
-
-    template <typename Iter, typename... Args, typename = std::enable_if_t<std::is_base_of<iterator_mc<false>, Iter>::value>>
-    Iter emplace(const Iter& n, Args&&... args) { return insert_impl(n, make_node(std::forward<Args>(args)...)); }
-
-    // Insert trees in forest as previous siblings.
-
-    template <typename Iter, typename = std::enable_if_t<std::is_base_of<iterator_mc<false>, Iter>::value>>
-    Iter graft(const Iter& n, ordered_forest of) { return insert_impl(n, std::move(of)); }
+    // Insertion member functions are templated on iterator class in order to return covariantly.
 
     // Insert/emplace item as next sibling.
 
     template <typename Iter, typename = std::enable_if_t<std::is_base_of<iterator_mc<false>, Iter>::value>>
-    Iter insert_after(const Iter& n, const V& item) { return insert_after_impl(n, make_node(item)); }
+    Iter insert_after(const Iter& i, const V& item) {
+        return assert_valid(i), splice_impl(i.n_->parent_, i.n_->next_, make_node(item));
+    }
 
     template <typename Iter, typename = std::enable_if_t<std::is_base_of<iterator_mc<false>, Iter>::value>>
-    Iter insert_after(const Iter& n, V&& item) { return insert_after_impl(n, make_node(std::move(item))); }
+    Iter insert_after(const Iter& i, V&& item) {
+        return assert_valid(i), splice_impl(i.n_->parent_, i.n_->next_, make_node(std::move(item)));
+    }
 
     template <typename Iter, typename... Args, typename = std::enable_if_t<std::is_base_of<iterator_mc<false>, Iter>::value>>
-    Iter emplace_after(const Iter& n, Args&&... args) { return insert_after_impl(n, make_node(std::forward<Args>(args)...)); }
+    Iter emplace_after(const Iter& i, Args&&... args) {
+        return assert_valid(i), splice_impl(i.n_->parent_, i.n_->next_, make_node(std::forward<Args>(args)...));
+    }
 
     // Insert trees in forest as next siblings.
 
     template <typename Iter, typename = std::enable_if_t<std::is_base_of<iterator_mc<false>, Iter>::value>>
-    Iter graft_after(const Iter& n, ordered_forest of) { return insert_after_impl(n, std::move(of)); }
+    Iter graft_after(const Iter& i, ordered_forest of) {
+        assert_valid(i);
+        if (of.empty()) return i;
 
-    ~ordered_forest() {
-        delete_node(first);
+        node* sp_first = of.first_;
+        of.first_ = nullptr; // (take ownership)
+        return splice_impl(i.n_->parent_, i.n_->next, of.first_);
     }
 
+    // Insert item as first child.
+
+    template <typename Iter, typename = std::enable_if_t<std::is_base_of<iterator_mc<false>, Iter>::value>>
+    Iter push_child(const Iter& i, const V& item) {
+        return assert_valid(i), splice_impl(i.n_, i.n_->child_, make_node(item));
+    }
+
+    template <typename Iter, typename = std::enable_if_t<std::is_base_of<iterator_mc<false>, Iter>::value>>
+    Iter push_child(const Iter& i, V&& item) {
+        return assert_valid(i), splice_impl(i.n_, i.n_->child_, make_node(std::move(item)));
+    }
+
+    template <typename Iter, typename... Args, typename = std::enable_if_t<std::is_base_of<iterator_mc<false>, Iter>::value>>
+    Iter emplace_child(const Iter& i, Args&&... args) {
+        return assert_valid(i), splice_impl(i.n_, i.n_->child_, make_node(std::forward<Args>(args)...));
+    }
+
+    // Insert trees in forest as first children.
+
+    template <typename Iter, typename = std::enable_if_t<std::is_base_of<iterator_mc<false>, Iter>::value>>
+    Iter graft_child(const Iter& i, ordered_forest of) {
+        assert_valid(i);
+        if (of.empty()) return i;
+
+        node* sp_first = of.first_;
+        of.first_ = nullptr; // (take ownership)
+        return splice_impl(i.n_->parent_, i.n_->child_, of.first_);
+    }
+
+    // Insert item as first top-level tree.
+
+    iterator push_front(const V& item) {
+        return splice_impl(nullptr, first_, make_node(item));
+    }
+
+    iterator push_front(V&& item) {
+        return splice_impl(nullptr, first_, make_node(std::move(item)));
+    }
+
+    template <typename... Args>
+    iterator emplace_front(Args&&... args) {
+        return splice_impl(nullptr, first_, make_node(std::forward<Args>(args)...));
+    }
+
+    // Insert trees in forest as first top-level children.
+
+    iterator graft_front(ordered_forest of) {
+        if (of.empty()) return {};
+
+        node* sp_first = of.first_;
+        of.first_ = nullptr; // (take ownership)
+        return splice_impl(nullptr, first_, of.first_);
+    }
+
+    // Erase and cut operations:
+    //
+    // * Erase/pop operations replace a node with all of that node's children.
+    // * Prune operations remove a whole subtree, and return it as a new ordered forest.
+
+    // Erase/cut next sibling.
+
+    void erase_after(const iterator_mc<false>& i) {
+        assert_valid(i.next()), erase_impl(i.n_->next_);
+    }
+
+    ordered_forest prune_after(const iterator_mc<false>& i) {
+        return assert_valid(i.next()), prune_impl(i.n_->next_);
+    }
+
+    // Erase/cut first child.
+
+    void erase_child(const iterator_mc<false>& i) {
+        assert_valid(i.child()), erase_impl(i.n_->child_);
+    }
+
+    ordered_forest prune_child(const iterator_mc<false>& i) {
+        return assert_valid(i.child()), prune_impl(i.n_->child_);
+    }
+
+    // Erase/cut root of first tree. Precondition: forest is non-empty.
+
+    void erase_front(const iterator_mc<false>& i) {
+        erase_impl(first_);
+    }
+
+    ordered_forest prune_front(const iterator_mc<false>& i) {
+        return prune_impl(first_);
+    }
+
+    // Access by reference to root of first tree.
+
+    V& front() { return *begin(); }
+    const V& front() const { return *begin(); }
+
+    ~ordered_forest() { delete_node(first_); }
+
 private:
-    using node_alloc_t = typename std::allocator_traits<Allocator>::rebind<node>;
+    using node_alloc_t = typename std::allocator_traits<Allocator>::template rebind_alloc<node>;
     using item_alloc_traits = std::allocator_traits<Allocator>;
     using node_alloc_traits = std::allocator_traits<node_alloc_t>;
 
-    Allocator item_alloc;
-    node_alloc_t node_alloc;
-    node* first = nullptr;
+    Allocator item_alloc_;
+    node_alloc_t node_alloc_;
+    node* first_ = nullptr;
+
+    iterator_mc<false> first_else_end() { return iterator_mc<false>{first_}; }
+    iterator_mc<true> first_else_end() const { return iterator_mc<true>{first_}; }
 
     // Make forest from pre-allocated node.
     explicit ordered_forest(node* n): first_(n) {}
 
-    node first_or_empty() const { return first? *first: node{}; }
-
-    node insert_impl(const node& n, node* x) {
-        return insert_impl(n, ordered_forest(x));
+    // Throw on invalid iterator.
+    void assert_valid(iterator_base i) {
+        if (!i.n_) throw std::invalid_argument("bad iterator");
     }
 
-    node insert_impl(const node& n, ordered_forest&& of) {
-        if (of.empty()) return n;
-        if (!n.prev_ && !n.parent_) throw std::invalid_argument("bad iterator");
-
-        node* of_first = of.first_;
-        of.first_ = nullptr;
-
-        node* of_last = nullptr;
-        for (node* i = of_first; i; i = i->next_) {
-            i->parent_ = n->parent_;
-            of_last = i;
-        }
-
-        if (n.prev_) {
-            of_first.prev_ = n.prev_;
-            of_last.next_ = n.prev_->next_;
-            n.prev_->next_ = of_first;
-            return *of_last;
-        }
-        else {
-            of_first.next_ = n.parent_->child_;
-            n.parent_->child_ = of_first;
-            return *of_last;
-        }
+    ordered_forest prune_impl(node*& next_write) {
+        node* r = next_write;
+        next_write = next_write->next_;
+        return ordered_forest(r);
     }
+
+    void erase_impl(node*& next_write) {
+        ordered_forest cut = prune_impl(next_write);
+
+        node* cut_root = cut.first_;
+        if (cut_root->child_) {
+            splice_impl(next_write->parent_, next_write, cut_root->child_);
+        }
+
+        cut_root->child_ = nullptr;
+        delete_node(cut_root);
+    }
+
+    iterator_mc<false> splice_impl(node* parent, node*& next_write, node* sp_first) {
+        node* sp_last = nullptr;
+
+        for (node* j = sp_first; j; j = j->next_) {
+            j->parent_ = parent;
+            sp_last = j;
+        }
+        sp_last->next_ = next_write;
+        next_write = sp_first;
+
+        return iterator_mc<false>{sp_last};
+    }
+
+    // Node creation, destruction:
 
     template <typename... Args>
     node* make_node(Args&&... args) {
-        node* x = alloc_node();
-        x->item_ = item_alloc_traits::allocate(item_alloc, 1);
+        node* x = node_alloc_traits::allocate(node_alloc_, 1);
         try {
-            item_alloc_traits::construct(item_alloc, x->item, std::forward<Args>(args)...);
+            node_alloc_traits::construct(node_alloc_, x);
         }
         catch (...) {
-            item_alloc_trais::deallocate(item_alloc, x->item_, 1);
+            node_alloc_traits::deallocate(node_alloc_, x, 1);
+            throw;
+        }
+
+        x->item_ = item_alloc_traits::allocate(item_alloc_, 1);
+        try {
+            item_alloc_traits::construct(item_alloc_, x->item_, std::forward<Args>(args)...);
+        }
+        catch (...) {
+            item_alloc_traits::deallocate(item_alloc_, x->item_, 1);
             throw;
         }
         return x;
@@ -251,19 +375,19 @@ private:
     void delete_node(node* n) {
         if (!n) return;
 
-        delete_item(item);
-        delete_node(child);
-        delete_node(right);
+        delete_item(n->item_);
+        delete_node(n->child_);
+        delete_node(n->next_);
 
-        node_alloc_traits::destroy(node_alloc, n);
-        node_alloc_traits::deallocate(node_alloc, n, 1);
+        node_alloc_traits::destroy(node_alloc_, n);
+        node_alloc_traits::deallocate(node_alloc_, n, 1);
     }
 
     void delete_item(V* item) {
         if (!item) return;
 
-        item_alloc_traits::destroy(item_alloc, n);
-        item_alloc_traits::deallocate(item_alloc, n, 1);
+        item_alloc_traits::destroy(item_alloc_, item);
+        item_alloc_traits::deallocate(item_alloc_, item, 1);
     }
 };
 
