@@ -197,7 +197,7 @@ struct ordered_forest {
 
         node* sp_first = of.first_;
         of.first_ = nullptr; // (take ownership)
-        return splice_impl(i.n_->parent_, i.n_->next, of.first_);
+        return splice_impl(i.n_->parent_, i.n_->next_, sp_first);
     }
 
     // Insert item as first child.
@@ -226,7 +226,7 @@ struct ordered_forest {
 
         node* sp_first = of.first_;
         of.first_ = nullptr; // (take ownership)
-        return splice_impl(i.n_->parent_, i.n_->child_, of.first_);
+        return splice_impl(i.n_->parent_, i.n_->child_, sp_first);
     }
 
     // Insert item as first top-level tree.
@@ -251,7 +251,7 @@ struct ordered_forest {
 
         node* sp_first = of.first_;
         of.first_ = nullptr; // (take ownership)
-        return splice_impl(nullptr, first_, of.first_);
+        return splice_impl(nullptr, first_, sp_first);
     }
 
     // Erase and cut operations:
@@ -294,30 +294,50 @@ struct ordered_forest {
     V& front() { return *begin(); }
     const V& front() const { return *begin(); }
 
-    // Constructors, destructors:
+    // Constructors, assignment, destructors:
 
     ordered_forest(Allocator alloc = Allocator{}):
         item_alloc_(std::move(alloc)),
         node_alloc_(item_alloc_)
     {}
 
-    ordered_forest(ordered_forest&&) = default;
+    ordered_forest(ordered_forest&& other) {
+        first_ = other.first_;
+        other.first_ = nullptr;
+    }
+
+    ordered_forest(std::initializer_list<ordered_forest_builder<V>> blist) {
+        sibling_iterator j;
+        for (auto& b: blist) {
+            j = j? graft_after(j, std::move(b.f_)): sibling_iterator(graft_front(std::move(b.f_)));
+        }
+    }
+
+    ordered_forest(const ordered_forest& other) { copy_impl(other); }
 
     template <typename U, typename OtherAllocator>
-    ordered_forest(const ordered_forest<U, OtherAllocator>& other) {
-        auto copy_children = [&](auto& self, const auto& from, auto& to) -> void {
-            sibling_iterator j;
-            for (auto i = other.child_begin(from); i!=other.child_end(from); ++i) {
-                j = j? insert_after(j, *i): sibling_iterator(push_child(to, *i));
-                self(self, i, j);
-            }
-        };
+    ordered_forest(const ordered_forest<U, OtherAllocator>& other) { copy_impl(other); }
 
-        sibling_iterator j;
-        for (auto i = other.root_begin(); i!=other.root_end(); ++i) {
-            j = j? insert_after(j, *i): sibling_iterator(push_front(*i));
-            copy_children(copy_children, i, j);
-        }
+    ordered_forest& operator=(const ordered_forest& other) {
+        if (this==&other) return *this;
+        delete_node(first_);
+        copy_impl(other);
+        return *this;
+    }
+
+    template <typename U, typename OtherAllocator>
+    ordered_forest& operator=(const ordered_forest<U, OtherAllocator>& other) {
+        if (this==&other) return *this;
+        delete_node(first_);
+        copy_impl(other);
+        return *this;
+    }
+
+    ordered_forest& operator=(ordered_forest&& other) {
+        delete_node(first_);
+        first_ = other.first_;
+        other.first_ = nullptr;
+        return *this;
     }
 
     ~ordered_forest() { delete_node(first_); }
@@ -373,6 +393,23 @@ private:
         return iterator_mc<false>{sp_last};
     }
 
+    template <typename U, typename OtherAllocator>
+    void copy_impl(const ordered_forest<U, OtherAllocator>& other) {
+        auto copy_children = [&](auto& self, const auto& from, auto& to) -> void {
+            sibling_iterator j;
+            for (auto i = other.child_begin(from); i!=other.child_end(from); ++i) {
+                j = j? insert_after(j, *i): sibling_iterator(push_child(to, *i));
+                self(self, i, j);
+            }
+        };
+
+        sibling_iterator j;
+        for (auto i = other.root_begin(); i!=other.root_end(); ++i) {
+            j = j? insert_after(j, *i): sibling_iterator(push_front(*i));
+            copy_children(copy_children, i, j);
+        }
+    }
+
     // Node creation, destruction:
 
     template <typename... Args>
@@ -414,5 +451,36 @@ private:
         item_alloc_traits::destroy(item_alloc_, item);
         item_alloc_traits::deallocate(item_alloc_, item, 1);
     }
+};
+
+// Helper class for building trees from initializer_lists. Ordered forest can be
+// constructed from an initalizer list of builder objects; each builder object
+// represents a tree, constructed from a single value, or a pair: root value
+// and a sequence of builder objects represeting the children.
+
+template <typename V>
+struct ordered_forest_builder {
+    template <typename X, typename std::enable_if_t<std::is_constructible<V, X&&>::value, int> = 0>
+    ordered_forest_builder(X&& x) {
+        f_.emplace_front(x);
+    }
+
+    template <typename X, typename std::enable_if_t<std::is_constructible<V, X&&>::value, int> = 0>
+    ordered_forest_builder(X&& x, std::initializer_list<ordered_forest_builder<V>> children) {
+        using sibling_iterator = typename ordered_forest<V>::sibling_iterator;
+
+        auto top = f_.emplace_front(x);
+        sibling_iterator j;
+
+        for (auto& g: children) {
+            ordered_forest<V> c(std::move(g.f_));
+            j = j? f_.graft_after(j, std::move(c)): sibling_iterator(f_.graft_child(top, std::move(c)));
+        }
+    }
+
+    friend class ordered_forest<V>;
+
+private:
+    ordered_forest<V> f_;
 };
 
