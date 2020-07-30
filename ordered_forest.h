@@ -4,6 +4,9 @@
 #include <iterator>
 #include <memory>
 
+template <typename V>
+struct ordered_forest_builder;
+
 template <typename V, typename Allocator = std::allocator<V>>
 struct ordered_forest {
     using size_type = std::size_t;
@@ -20,6 +23,7 @@ struct ordered_forest {
 
         iterator_base() = default;
         explicit iterator_base(node* n): n_(n) {}
+        explicit operator bool() const { return n_; }
     };
 
     // Constructor overloads for iterators permit construction of any const
@@ -76,16 +80,16 @@ struct ordered_forest {
     };
 
     template <bool const_flag>
-    struct child_iterator_mc: iterator_mc<const_flag> {
-        child_iterator_mc() = default;
-        child_iterator_mc(const iterator_mc<const_flag>& i): iterator_mc<const_flag>(i) {}
+    struct sibling_iterator_mc: iterator_mc<const_flag> {
+        sibling_iterator_mc() = default;
+        sibling_iterator_mc(const iterator_mc<const_flag>& i): iterator_mc<const_flag>(i) {}
 
-        child_iterator_mc& operator++() { return *this = this->next(); }
-        child_iterator_mc operator++(int) { auto p = *this; return ++*this, p; }
+        sibling_iterator_mc& operator++() { return *this = this->next(); }
+        sibling_iterator_mc operator++(int) { auto p = *this; return ++*this, p; }
     };
 
-    using child_iterator = child_iterator_mc<false>;
-    using const_child_iterator = child_iterator_mc<true>;
+    using sibling_iterator = sibling_iterator_mc<false>;
+    using const_sibling_iterator = sibling_iterator_mc<true>;
 
     template <bool const_flag>
     struct preorder_iterator_mc: iterator_mc<const_flag> {
@@ -111,11 +115,6 @@ struct ordered_forest {
     using postorder_iterator = postorder_iterator_mc<false>;
     using const_postorder_iterator = postorder_iterator_mc<true>;
 
-    ordered_forest(Allocator alloc = Allocator{}):
-        item_alloc_(std::move(alloc)),
-        node_alloc_(item_alloc_)
-    {}
-
     bool empty() const { return !first_; }
 
     // Note: size is O(n) in the number of elements n.
@@ -125,17 +124,17 @@ struct ordered_forest {
         return n;
     }
 
-    child_iterator child_begin(const iterator_mc<false>& i) { return child_iterator{i}; }
-    const_child_iterator child_begin(const iterator_mc<true>& i) const { return const_child_iterator{i}; }
+    sibling_iterator child_begin(const iterator_mc<false>& i) { return sibling_iterator{i.child()}; }
+    const_sibling_iterator child_begin(const iterator_mc<true>& i) const { return const_sibling_iterator{i.child()}; }
 
-    child_iterator child_end(const iterator_base&) { return {}; }
-    const_child_iterator child_end(const iterator_base&) const { return {}; }
+    sibling_iterator child_end(const iterator_base&) { return {}; }
+    const_sibling_iterator child_end(const iterator_base&) const { return {}; }
 
-    child_iterator root_begin() { return child_iterator{first_else_end()}; }
-    const_child_iterator root_begin() const { return const_child_iterator{first_else_end()}; }
+    sibling_iterator root_begin() { return sibling_iterator{first_else_end()}; }
+    const_sibling_iterator root_begin() const { return const_sibling_iterator{first_else_end()}; }
 
-    child_iterator root_end() { return child_iterator{}; }
-    const_child_iterator root_end() const { return const_child_iterator{}; }
+    sibling_iterator root_end() { return sibling_iterator{}; }
+    const_sibling_iterator root_end() const { return const_sibling_iterator{}; }
 
     postorder_iterator postorder_begin() { return postorder_iterator{first_else_end()}; }
     const_postorder_iterator postorder_begin() const { return const_postorder_iterator{first_else_end()}; }
@@ -294,6 +293,32 @@ struct ordered_forest {
 
     V& front() { return *begin(); }
     const V& front() const { return *begin(); }
+
+    // Constructors, destructors:
+
+    ordered_forest(Allocator alloc = Allocator{}):
+        item_alloc_(std::move(alloc)),
+        node_alloc_(item_alloc_)
+    {}
+
+    ordered_forest(ordered_forest&&) = default;
+
+    template <typename U, typename OtherAllocator>
+    ordered_forest(const ordered_forest<U, OtherAllocator>& other) {
+        auto copy_children = [&](auto& self, const auto& from, auto& to) -> void {
+            sibling_iterator j;
+            for (auto i = other.child_begin(from); i!=other.child_end(from); ++i) {
+                j = j? insert_after(j, *i): sibling_iterator(push_child(to, *i));
+                self(self, i, j);
+            }
+        };
+
+        sibling_iterator j;
+        for (auto i = other.root_begin(); i!=other.root_end(); ++i) {
+            j = j? insert_after(j, *i): sibling_iterator(push_front(*i));
+            copy_children(copy_children, i, j);
+        }
+    }
 
     ~ordered_forest() { delete_node(first_); }
 

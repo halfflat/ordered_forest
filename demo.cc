@@ -18,4 +18,9 @@ int main() {
     for (auto n: f) {
         std::cout << n << '\n';
     }
+
+    ordered_forest<double> x(f);
+    for (auto n: x) {
+        std::cout << n << '\n';
+    }
 }
