@@ -1,22 +1,32 @@
-#pragma once
+#ifndef ORDERED_FOREST_H_
+#define ORDERED_FOREST_H_
 
 #include <type_traits>
 #include <iterator>
 #include <memory>
+#include <utility>
 
-template <typename V>
+template <typename V, typename Allocator>
 struct ordered_forest_builder;
 
 template <typename V, typename Allocator = std::allocator<V>>
 struct ordered_forest {
-    using size_type = std::size_t;
-
+private:
     struct node {
         V* item_ = nullptr;
         node* parent_ = nullptr;
         node* child_ = nullptr;
         node* next_ = nullptr;
     };
+
+    using node_alloc_t = typename std::allocator_traits<Allocator>::template rebind_alloc<node>;
+    using item_alloc_traits = std::allocator_traits<Allocator>;
+    using node_alloc_traits = std::allocator_traits<node_alloc_t>;
+
+public:
+    using value_type = V;
+    using allocator_type = Allocator;
+    using size_type = std::size_t;
 
     struct iterator_base {
         node* n_ = nullptr;
@@ -36,7 +46,7 @@ struct ordered_forest {
         using reference = std::conditional_t<const_flag, const V&, V&>;
         using value_type = V;
         using difference_type = std::ptrdiff_t;
-        using iterator_tag = std::forward_iterator_tag;
+        using iterator_category = std::forward_iterator_tag;
 
         iterator_mc() = default;
 
@@ -136,17 +146,17 @@ struct ordered_forest {
     sibling_iterator root_end() { return sibling_iterator{}; }
     const_sibling_iterator root_end() const { return const_sibling_iterator{}; }
 
-    postorder_iterator postorder_begin() { return postorder_iterator{first_else_end()}; }
+    postorder_iterator postorder_begin() { return postorder_iterator{first_leaf()}; }
     const_postorder_iterator postorder_begin() const { return const_postorder_iterator{first_else_end()}; }
 
-    postorder_iterator postorder_end(const iterator_base&) { return {}; }
-    const_postorder_iterator postorder_end(const iterator_base&) const { return {}; }
+    postorder_iterator postorder_end() { return {}; }
+    const_postorder_iterator postorder_end() const { return {}; }
 
     preorder_iterator preorder_begin() { return preorder_iterator{first_else_end()}; }
     const_preorder_iterator preorder_begin() const { return const_preorder_iterator{first_else_end()}; }
 
-    preorder_iterator preorder_end(const iterator_base&) { return {}; }
-    const_preorder_iterator preorder_end(const iterator_base&) const { return {}; }
+    preorder_iterator preorder_end() { return {}; }
+    const_preorder_iterator preorder_end() const { return {}; }
 
     // Default iteration is preorder.
 
@@ -195,8 +205,10 @@ struct ordered_forest {
         assert_valid(i);
         if (of.empty()) return i;
 
-        node* sp_first = of.first_;
-        of.first_ = nullptr; // (take ownership)
+        // Underlying move or copy depends upon allocator equality.
+        ordered_forest f(std::move(of), get_allocator());
+        node* sp_first = f.first_;
+        f.first_ = nullptr;
         return splice_impl(i.n_->parent_, i.n_->next_, sp_first);
     }
 
@@ -224,8 +236,10 @@ struct ordered_forest {
         assert_valid(i);
         if (of.empty()) return i;
 
-        node* sp_first = of.first_;
-        of.first_ = nullptr; // (take ownership)
+        // Underlying move or copy depends upon allocator equality.
+        ordered_forest f(std::move(of), get_allocator());
+        node* sp_first = f.first_;
+        f.first_ = nullptr;
         return splice_impl(i.n_->parent_, i.n_->child_, sp_first);
     }
 
@@ -249,8 +263,10 @@ struct ordered_forest {
     iterator graft_front(ordered_forest of) {
         if (of.empty()) return {};
 
-        node* sp_first = of.first_;
-        of.first_ = nullptr; // (take ownership)
+        // Underlying move or copy depends upon allocator equality.
+        ordered_forest f(std::move(of), get_allocator());
+        node* sp_first = f.first_;
+        f.first_ = nullptr;
         return splice_impl(nullptr, first_, sp_first);
     }
 
@@ -296,63 +312,137 @@ struct ordered_forest {
 
     // Constructors, assignment, destructors:
 
-    ordered_forest(Allocator alloc = Allocator{}):
-        item_alloc_(std::move(alloc)),
-        node_alloc_(item_alloc_)
+    ordered_forest(const Allocator& alloc = Allocator()) noexcept:
+        item_alloc_(alloc),
+        node_alloc_(alloc)
     {}
 
-    ordered_forest(ordered_forest&& other) {
+    ordered_forest(ordered_forest&& other) noexcept:
+        ordered_forest(std::move(other.item_alloc_))
+    {
         first_ = other.first_;
         other.first_ = nullptr;
     }
 
-    ordered_forest(std::initializer_list<ordered_forest_builder<V>> blist) {
-        sibling_iterator j;
-        for (auto& b: blist) {
-            j = j? graft_after(j, std::move(b.f_)): sibling_iterator(graft_front(std::move(b.f_)));
+    ordered_forest(ordered_forest&& other, const Allocator& alloc):
+        ordered_forest(alloc)
+    {
+        if (allocators_equal(other)) {
+            first_ = other.first_;
+            other.first_ = nullptr;
+        }
+        else {
+            copy_impl(other);
         }
     }
 
-    ordered_forest(const ordered_forest& other) { copy_impl(other); }
+    ordered_forest(std::initializer_list<ordered_forest_builder<V, Allocator>> blist, const Allocator& alloc = Allocator{}):
+        ordered_forest(alloc)
+    {
+        sibling_iterator j;
+        for (auto& b: blist) {
+            ordered_forest f(std::move(b.f_), item_alloc_);
+            j = j? graft_after(j, std::move(f)): sibling_iterator(graft_front(std::move(f)));
+        }
+    }
 
-    template <typename U, typename OtherAllocator>
-    ordered_forest(const ordered_forest<U, OtherAllocator>& other) { copy_impl(other); }
+    ordered_forest(const ordered_forest& other):
+        ordered_forest(item_alloc_traits::select_on_container_copy_construction(other.item_alloc_))
+    {
+        copy_impl(other);
+    }
+
+    ordered_forest(const ordered_forest& other, const Allocator& alloc):
+        ordered_forest(alloc)
+    {
+        copy_impl(other);
+    }
 
     ordered_forest& operator=(const ordered_forest& other) {
         if (this==&other) return *this;
         delete_node(first_);
-        copy_impl(other);
-        return *this;
-    }
 
-    template <typename U, typename OtherAllocator>
-    ordered_forest& operator=(const ordered_forest<U, OtherAllocator>& other) {
-        if (this==&other) return *this;
-        delete_node(first_);
+        if (item_alloc_traits::propagate_on_container_copy_assignment::value) {
+            item_alloc_ = other.item_alloc_;
+        }
+        if (node_alloc_traits::propagate_on_container_copy_assignment::value) {
+            node_alloc_ = other.node_alloc_;
+        }
+
         copy_impl(other);
         return *this;
     }
 
     ordered_forest& operator=(ordered_forest&& other) {
+        if (this==&other) return *this;
         delete_node(first_);
-        first_ = other.first_;
-        other.first_ = nullptr;
+
+        if (item_alloc_traits::propagate_on_container_move_assignment::value) {
+            item_alloc_ = other.item_alloc_;
+        }
+        if (node_alloc_traits::propagate_on_container_move_assignment::value) {
+            node_alloc_ = other.node_alloc_;
+        }
+
+        if (allocators_equal(other)) {
+            first_ = other.first_;
+            other.first_ = nullptr;
+        }
+        else {
+            copy_impl(other);
+        }
         return *this;
     }
 
     ~ordered_forest() { delete_node(first_); }
 
-private:
-    using node_alloc_t = typename std::allocator_traits<Allocator>::template rebind_alloc<node>;
-    using item_alloc_traits = std::allocator_traits<Allocator>;
-    using node_alloc_traits = std::allocator_traits<node_alloc_t>;
+    // Swap
 
+    void swap(ordered_forest& other)
+        noexcept(
+            (item_alloc_traits::propagate_on_container_swap::value && node_alloc_traits::propagate_on_container_swap::value) ||
+            (item_alloc_traits::is_always_equal::value && node_alloc_traits::is_always_equal::value)
+        )
+    {
+        using std::swap;
+        if (item_alloc_traits::propagate_on_container_swap::value) {
+            swap(item_alloc_, other.item_alloc_);
+        }
+        if (node_alloc_traits::propagate_on_container_swap::value) {
+            swap(node_alloc_, other.node_alloc_);
+        }
+
+        swap(first_, other.first_);
+    }
+
+    friend void swap(ordered_forest& a, ordered_forest& b) {
+        a.swap(b);
+    }
+
+    // Allocator access
+
+    allocator_type get_allocator() const noexcept { return item_alloc_; }
+
+private:
     Allocator item_alloc_;
     node_alloc_t node_alloc_;
     node* first_ = nullptr;
 
+    bool allocators_equal(const ordered_forest& other) const {
+        return item_alloc_==other.item_alloc_ && node_alloc_==other.node_alloc_;
+    }
+
     iterator_mc<false> first_else_end() { return iterator_mc<false>{first_}; }
     iterator_mc<true> first_else_end() const { return iterator_mc<true>{first_}; }
+
+    iterator_mc<false> first_leaf() { return iterator_mc<false>{first_leaf_node()}; }
+    iterator_mc<true> first_leaf() const { return iterator_mc<true>{first_leaf_node()}; }
+
+    node* first_leaf_node() const {
+        node* n = first_;
+        while (n && n->child_) n = n->child_;
+        return n;
+    }
 
     // Make forest from pre-allocated node.
     explicit ordered_forest(node* n): first_(n) {}
@@ -454,11 +544,14 @@ private:
 };
 
 // Helper class for building trees from initializer_lists. Ordered forest can be
-// constructed from an initalizer list of builder objects; each builder object
+// constructed from an initializer list of builder objects; each builder object
 // represents a tree, constructed from a single value, or a pair: root value
 // and a sequence of builder objects represeting the children.
+//
+// While the builder takes the same allocator type as its associated forest, it
+// will build the temporary trees with a default-constructed allocator.
 
-template <typename V>
+template <typename V, typename Allocator>
 struct ordered_forest_builder {
     template <typename X, typename std::enable_if_t<std::is_constructible<V, X&&>::value, int> = 0>
     ordered_forest_builder(X&& x) {
@@ -466,21 +559,22 @@ struct ordered_forest_builder {
     }
 
     template <typename X, typename std::enable_if_t<std::is_constructible<V, X&&>::value, int> = 0>
-    ordered_forest_builder(X&& x, std::initializer_list<ordered_forest_builder<V>> children) {
-        using sibling_iterator = typename ordered_forest<V>::sibling_iterator;
+    ordered_forest_builder(X&& x, std::initializer_list<ordered_forest_builder<V, Allocator>> children) {
+        using sibling_iterator = typename ordered_forest<V, Allocator>::sibling_iterator;
 
         auto top = f_.emplace_front(x);
         sibling_iterator j;
 
         for (auto& g: children) {
-            ordered_forest<V> c(std::move(g.f_));
+            ordered_forest<V, Allocator> c(std::move(g.f_));
             j = j? f_.graft_after(j, std::move(c)): sibling_iterator(f_.graft_child(top, std::move(c)));
         }
     }
 
-    friend class ordered_forest<V>;
+    friend class ordered_forest<V, Allocator>;
 
 private:
-    ordered_forest<V> f_;
+    ordered_forest<V, Allocator> f_;
 };
 
+#endif // ndef ORDERED_FOREST_H_
