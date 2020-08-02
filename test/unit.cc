@@ -190,6 +190,32 @@ TEST_CASE("initializer_list") {
     CHECK(!(bool)i.next());
 }
 
+TEST_CASE("equality") {
+    using of = ordered_forest<int>;
+
+    CHECK(of{} == of{});
+    CHECK(of{1} != of{});
+    CHECK(of{} != of{1});
+
+    CHECK(of{1, 2, 3} == of{1, 2, 3});
+    CHECK(of{1, 2, 3} != of{1, {2, {3}}});
+    CHECK(of{{1, {2, 3}}} != of{1, 2, 3});
+
+    struct always_eq {
+        int n_;
+        always_eq(int n): n_(n) {}
+        bool operator==(const always_eq&) const { return true; }
+        bool operator!=(const always_eq&) const { return false; }
+    };
+
+    ordered_forest<always_eq> f1 = {{1, {2, 3}}, {4, {5, {6, {7}}, 8}}, 9};
+    ordered_forest<always_eq> f2 = {{3, {1, 0}}, {2, {8, {6, {4}}, 7}}, 5};
+    CHECK(f1 == f2);
+
+    ordered_forest<always_eq> f3 = {{3, {{1, {0}}}}, {2, {8, {6, {4}}, 7}}, 5};
+    CHECK(f1 != f3);
+}
+
 TEST_CASE("iteration") {
     using ivector = std::vector<int>;
 
@@ -274,3 +300,41 @@ TEST_CASE("copy/move") {
     CHECK(other_alloc.n_alloc() == 18u);
     CHECK(other_alloc.n_dealloc() == 0u);
 }
+
+TEST_CASE("erase") {
+    simple_allocator<int> alloc;
+    REQUIRE(alloc.n_alloc() == 0u);
+    REQUIRE(alloc.n_dealloc() == 0u);
+
+    using ivector = std::vector<int>;
+    using of = ordered_forest<int, simple_allocator<int>>;
+
+    of f({1, 2, {3, {4, {5, {6, 7}}, 8}}, 9}, alloc);
+    CHECK(alloc.n_alloc() == 18u);
+
+    auto two = std::find(f.begin(), f.end(), 2);
+    f.erase_after(two);
+
+    CHECK(f == of{1, 2, 4, {5, {6, 7}}, 8, 9});
+    CHECK(alloc.n_dealloc() == 2u);
+
+    auto five = std::find(f.begin(), f.end(), 5);
+    f.erase_child(five);
+
+    CHECK(f == of{1, 2, 4, {5, {7}}, 8, 9});
+    CHECK(alloc.n_dealloc() == 4u);
+
+    auto eight = std::find(f.begin(), f.end(), 8);
+    REQUIRE_THROWS_AS(f.erase_child(eight), std::invalid_argument);
+
+    auto seven = std::find(f.begin(), f.end(), 7);
+    REQUIRE_THROWS_AS(f.erase_after(seven), std::invalid_argument);
+
+    f.erase_front();
+    CHECK(f == of{2, 4, {5, {7}}, 8, 9});
+    CHECK(alloc.n_dealloc() == 6u);
+
+    of empty;
+    REQUIRE_THROWS_AS(empty.erase_front(), std::invalid_argument);
+}
+

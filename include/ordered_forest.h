@@ -297,18 +297,35 @@ public:
 
     // Erase/cut root of first tree. Precondition: forest is non-empty.
 
-    void erase_front(const iterator_mc<false>& i) {
-        erase_impl(first_);
+    void erase_front() {
+        assert_nonempty(), erase_impl(first_);
     }
 
-    ordered_forest prune_front(const iterator_mc<false>& i) {
-        return prune_impl(first_);
+    ordered_forest prune_front() {
+        return assert_nonempty(), prune_impl(first_);
     }
 
     // Access by reference to root of first tree.
 
     V& front() { return *begin(); }
     const V& front() const { return *begin(); }
+
+    // Comparison:
+
+    bool operator==(const ordered_forest& other) const {
+        const_iterator a = begin();
+        const_iterator b = other.begin();
+
+        while (a && b) {
+            if (!a.child() != !b.child() || !a.next() != !b.next() || !(*a==*b)) return false;
+            ++a, ++b;
+        }
+        return !a && !b;
+    }
+
+    bool operator!=(const ordered_forest& other) const {
+        return !(*this==other);
+    }
 
     // Constructors, assignment, destructors:
 
@@ -444,18 +461,25 @@ private:
         return n;
     }
 
-    // Make forest from pre-allocated node.
-    explicit ordered_forest(node* n): first_(n) {}
-
     // Throw on invalid iterator.
     void assert_valid(iterator_base i) {
         if (!i.n_) throw std::invalid_argument("bad iterator");
     }
 
+    void assert_nonempty() {
+        if (!first_) throw std::invalid_argument("empty forest");
+    }
+
     ordered_forest prune_impl(node*& next_write) {
         node* r = next_write;
         next_write = next_write->next_;
-        return ordered_forest(r);
+        r->next_ = nullptr;
+        r->parent_ = nullptr;
+
+        ordered_forest f(get_allocator());
+        f.first_ = r;
+
+        return std::move(f);
     }
 
     void erase_impl(node*& next_write) {
@@ -467,7 +491,6 @@ private:
         }
 
         cut_root->child_ = nullptr;
-        delete_node(cut_root);
     }
 
     iterator_mc<false> splice_impl(node* parent, node*& next_write, node* sp_first) {
