@@ -75,8 +75,6 @@ TEST_CASE("empty") {
 
 TEST_CASE("push") {
     simple_allocator<int> alloc;
-    REQUIRE(alloc.n_alloc() == 0u);
-    REQUIRE(alloc.n_dealloc() == 0u);
 
     {
         ordered_forest<int, simple_allocator<int>> f(alloc);
@@ -117,8 +115,6 @@ TEST_CASE("push") {
 
 TEST_CASE("insert") {
     simple_allocator<int> alloc;
-    REQUIRE(alloc.n_alloc() == 0u);
-    REQUIRE(alloc.n_dealloc() == 0u);
 
     {
         ordered_forest<int, simple_allocator<int>> f(alloc);
@@ -254,8 +250,6 @@ TEST_CASE("iteration") {
 
 TEST_CASE("copy/move") {
     simple_allocator<int> alloc;
-    REQUIRE(alloc.n_alloc() == 0u);
-    REQUIRE(alloc.n_dealloc() == 0u);
 
     using ivector = std::vector<int>;
     using of = ordered_forest<int, simple_allocator<int>>;
@@ -303,10 +297,6 @@ TEST_CASE("copy/move") {
 
 TEST_CASE("erase") {
     simple_allocator<int> alloc;
-    REQUIRE(alloc.n_alloc() == 0u);
-    REQUIRE(alloc.n_dealloc() == 0u);
-
-    using ivector = std::vector<int>;
     using of = ordered_forest<int, simple_allocator<int>>;
 
     of f({1, 2, {3, {4, {5, {6, 7}}, 8}}, 9}, alloc);
@@ -338,3 +328,103 @@ TEST_CASE("erase") {
     REQUIRE_THROWS_AS(empty.erase_front(), std::invalid_argument);
 }
 
+TEST_CASE("prune") {
+    simple_allocator<int> alloc;
+    using of = ordered_forest<int, simple_allocator<int>>;
+
+    of f({1, 2, {3, {4, {5, {6, 7}}, 8}}, 9}, alloc);
+    CHECK(alloc.n_alloc() == 18u);
+    CHECK(alloc.n_dealloc() == 0u);
+
+    of p1 = f.prune_front();
+    CHECK(f == of{2, {3, {4, {5, {6, 7}}, 8}}, 9});
+    CHECK(p1 == of{1});
+
+    of p2 = f.prune_after(std::find(f.begin(), f.end(), 4));
+    CHECK(f == of{2, {3, {4, 8}}, 9});
+    CHECK(p2 == of{{5, {6, 7}}});
+
+    of p3 = f.prune_child(std::find(f.begin(), f.end(), 3));
+    CHECK(f == of{2, {3, {8}}, 9});
+    CHECK(p3 == of{4});
+
+    CHECK(alloc.n_dealloc() == 0u);
+    CHECK(p1.get_allocator() == f.get_allocator());
+    CHECK(p2.get_allocator() == f.get_allocator());
+    CHECK(p3.get_allocator() == f.get_allocator());
+
+    of empty;
+    REQUIRE_THROWS_AS(empty.erase_child(empty.begin()), std::invalid_argument);
+    REQUIRE_THROWS_AS(empty.erase_after(empty.begin()), std::invalid_argument);
+    REQUIRE_THROWS_AS(empty.erase_front(), std::invalid_argument);
+
+    of unit{1};
+    REQUIRE_THROWS_AS(unit.erase_child(unit.begin()), std::invalid_argument);
+    REQUIRE_THROWS_AS(unit.erase_after(unit.begin()), std::invalid_argument);
+}
+
+TEST_CASE("graft") {
+    using of = ordered_forest<int, simple_allocator<int>>;
+
+    of f1{1, {2, {3, 4}}, 5};
+    auto j = f1.graft_after(f1.begin(), of{6, {7, {8}}});
+
+    REQUIRE(j);
+    CHECK(*j == 7);
+    CHECK(f1 == of{1, 6, {7, {8}}, {2, {3, 4}}, 5});
+
+    j = f1.graft_child(std::find(f1.begin(), f1.end(), 2), of{9, 10});
+
+    REQUIRE(j);
+    CHECK(*j == 10);
+    CHECK(f1 == of{1, 6, {7, {8}}, {2, {9, 10, 3, 4}}, 5});
+
+    j = f1.graft_front(of{{11, {12, 13}}});
+
+    REQUIRE(j);
+    CHECK(*j == 11);
+    CHECK(f1 == of{{11, {12, 13}}, 1, 6, {7, {8}}, {2, {9, 10, 3, 4}}, 5});
+
+    simple_allocator<int> alloc1, alloc2;
+    of f2({1, 2}, alloc1);
+    of f3({3, 4}, alloc1);
+    of f4({5, 6}, alloc2);
+
+    CHECK(alloc1.n_alloc() == 8);
+    CHECK(alloc1.n_dealloc() == 0);
+    CHECK(alloc2.n_alloc() == 4);
+
+    f2.graft_front(std::move(f3));
+    CHECK(alloc1.n_alloc() == 8);
+    CHECK(alloc1.n_dealloc() == 0);
+
+    f2.graft_front(std::move(f4));
+    CHECK(alloc1.n_alloc() == 12);
+    CHECK(alloc1.n_dealloc() == 0);
+    CHECK(alloc2.n_dealloc() == 4);
+
+    CHECK(f2 == of{5, 6, 3, 4, 1, 2});
+}
+
+TEST_CASE("swap") {
+    simple_allocator<int> alloc1, alloc2;
+    using of = ordered_forest<int, simple_allocator<int>>;
+
+    of a({1, {2, {3, 4}}, 5}, alloc1);
+    of b({6, 7, 8, 9}, alloc2);
+
+    of a_copy(a), b_copy(b);
+
+    REQUIRE(a.get_allocator() == alloc1);
+    REQUIRE(b.get_allocator() == alloc2);
+    REQUIRE(a_copy.get_allocator() == alloc1);
+    REQUIRE(b_copy.get_allocator() == alloc2);
+    REQUIRE(a == a_copy);
+    REQUIRE(b == b_copy);
+
+    swap(a, b);
+    CHECK(a.get_allocator() == alloc2);
+    CHECK(b.get_allocator() == alloc1);
+    CHECK(a == b_copy);
+    CHECK(b == a_copy);
+}
