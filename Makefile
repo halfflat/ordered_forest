@@ -1,4 +1,5 @@
-.PHONY: clean realclean all
+.PHONY: clean realclean all coverage-report
+.PRECIOUS: %.o
 
 top:=$(dir $(realpath $(lastword $(MAKEFILE_LIST))))
 
@@ -10,11 +11,21 @@ vpath %.h $(top)include
 
 all:: unit
 
-unit: unit.cc ordered_forest.h
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+unit.o: ordered_forest.h
+unit: unit.o
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+coverage.info:
+	$(MAKE) CXXFLAGS="--coverage -std=c++14 -g -O0" unit
+	./unit > /dev/null
+	lcov --capture --no-external --directory . --base-directory=$(top)include -o $@
+
+coverage-report: coverage.info
+	mkdir -p report
+	genhtml -o report $<
 
 clean:
-	$(RM) unit.o
+	$(RM) unit.o unit.gcda unit.gcno ordered_forest.gcov coverage.info
 
 realclean: clean
-	$(RM) unit
+	$(RM) unit unit-instrumented

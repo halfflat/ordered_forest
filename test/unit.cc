@@ -4,7 +4,7 @@
 #include <vector>
 
 #define CATCH_CONFIG_MAIN
-#include <catch2/catch.hpp>
+#include "catch.hpp"
 
 #include "ordered_forest.h"
 
